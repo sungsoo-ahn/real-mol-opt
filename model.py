@@ -4,7 +4,23 @@ import json
 import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+from torch.distributions import Categorical
 
+def sample_smis(model, vocab, device, num_samples):
+    vecs, lengths = model.sample(vocab, device, num_samples)
+    smis = [vocab.vec2smiles(vecs[idx][:lengths[idx]], rem_eos=True, rem_bos=True) for idx in range(num_samples)]
+    return smis
+
+def sample_smis_by_batch(model, vocab, device, num_samples, batch_size):
+    offset = 0
+    smis = []
+    while offset < num_samples:
+        cur_batch_size = min(batch_size, num_samples - offset)
+        offset += batch_size
+        cur_smis = sample_smis(model, vocab, device, cur_batch_size)
+        smis += cur_smis
+
+    return smis
 
 class RecurrentNetwork(nn.Module):
     def __init__(self, vocab_size, hidden_size, num_layers):
@@ -30,91 +46,30 @@ class RecurrentNetwork(nn.Module):
         out = self.linear(out)
         return out, lengths, hiddens
 
-"""
-class Generator:
-    def __init__(self, vocab_size, hidden_size, num_layers, device):
-        self.model = GeneratorNetwork(vocab_size, hidden_size, num_layers)
-        self.model.to(device)
+    def sample(self, vocab, device, num_samples):
+        starts = torch.LongTensor(num_samples, 1).fill_(vocab.bos_id).to(device)
+        vecs = torch.LongTensor(num_samples, vocab.max_length).fill_(vocab.pad_id).to(device)
+        vecs[:, 0] = starts.squeeze(dim=1)
 
-    def get_log_prob(self, vecs, lens, device):
-        vecs =
+        lengths = torch.LongTensor(num_samples).fill_(1).to(device)
+        hiddens = None
+        ended = torch.zeros(num_samples, dtype=torch.bool).to(device)
 
-    def get_action_log_prob(self, actions, seq_lengths, device):
-        num_samples = actions.size(0)
-        actions_seq_length = actions.size(1)
-        log_probs = torch.FloatTensor(num_samples, actions_seq_length).to(device)
+        for time_idx in range(1, vocab.max_length):
+            output, _, hiddens = self(starts, lengths=None, hiddens=hiddens)
 
-        number_batches = (num_samples + self.max_sampling_batch_size - 1) // self.max_sampling_batch_size
-        remaining_samples = num_samples
-        batch_start = 0
-        for i in range(number_batches):
-            batch_size = min(self.max_sampling_batch_size, remaining_samples)
-            batch_end = batch_start + batch_size
-            log_probs[batch_start:batch_end, :] = self._get_action_log_prob_batch(
-                actions[batch_start:batch_end, :], seq_lengths[batch_start:batch_end], device
-            )
-            batch_start += batch_size
-            remaining_samples -= batch_size
+            # probabilities
+            probs = torch.softmax(output, dim=2)
 
-        return log_probs
+            # sample from probabilities
+            distribution = Categorical(probs=probs)
+            starts = top_ids = distribution.sample()
 
-    def save(self, save_dir):
-        self.model.save(save_dir)
-
-    def _get_action_log_prob_batch(self, actions, seq_lengths, device):
-        batch_size = actions.size(0)
-        actions_seq_length = actions.size(1)
-
-        start_token_vector = self._get_start_token_vector(batch_size, device)
-        input_actions = torch.cat([start_token_vector, actions[:, :-1]], dim=1)
-        target_actions = actions
-
-        input_actions = input_actions.to(device)
-        target_actions = target_actions.to(device)
-
-        output, _ = self.model(input_actions, hidden=None)
-        output = output.view(batch_size * actions_seq_length, -1)
-        log_probs = torch.log_softmax(output, dim=1)
-        log_target_probs = log_probs.gather(dim=1, index=target_actions.reshape(-1, 1)).squeeze(dim=1)
-        log_target_probs = log_target_probs.view(batch_size, self.max_seq_length)
-
-        mask = torch.arange(actions_seq_length).expand(len(seq_lengths), actions_seq_length) > (
-            seq_lengths - 1
-        ).unsqueeze(1)
-        log_target_probs[mask] = 0.0
-
-        return log_target_probs
-
-    def _sample_action_batch(self, batch_size, device):
-        hidden = None
-        inp = self._get_start_token_vector(batch_size, device)
-
-        action = torch.zeros((batch_size, self.max_seq_length), dtype=torch.long).to(device)
-        log_prob = torch.zeros((batch_size, self.max_seq_length), dtype=torch.float).to(device)
-        seq_length = torch.zeros(batch_size, dtype=torch.long).to(device)
-
-        ended = torch.zeros(batch_size, dtype=torch.bool).to(device)
-
-        for t in range(self.max_seq_length):
-            output, hidden = self.model(inp, hidden)
-
-            prob = torch.softmax(output, dim=2)
-            distribution = Categorical(probs=prob)
-            action_t = distribution.sample()
-            log_prob_t = distribution.log_prob(action_t)
-            inp = action_t
-
-            action[~ended, t] = action_t.squeeze(dim=1)[~ended]
-            log_prob[~ended, t] = log_prob_t.squeeze(dim=1)[~ended]
-
-            seq_length += (~ended).long()
-            ended = ended | (action_t.squeeze(dim=1) == self.char_dict.end_idx).bool()
+            vecs[~ended, time_idx] = top_ids.squeeze(dim=1)[~ended]
+            lengths += (~ended).long()
+            ended = ended | (top_ids.squeeze(dim=1) == vocab.eos_id).bool()
 
             if ended.all():
                 break
 
-        return action, log_prob, seq_length
-
-    def _get_start_token_vector(self, batch_size, device):
-        return torch.LongTensor(batch_size, 1).fill_(self.char_dict.begin_idx).to(device)
-"""
+        return vecs, lengths

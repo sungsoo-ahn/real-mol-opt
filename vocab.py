@@ -5,20 +5,8 @@ from rdkit import rdBase
 from rdkit import Chem
 import re
 
-def canonicalize_smiles(smi, raise_error=False):
-    try:
-        mol = Chem.MolFromSmiles(smi)
-        mol = Chem.RemoveHs(mol)
-        for atom in mol.GetAtoms():
-            atom.ClearProp("molAtomMapNumber")
-        canonicalized_smi = Chem.MolToSmiles(mol)
-        return canonicalized_smi
-    except:
-        if raise_error:
-            assert False
-        else:
-            return None
-
+from torch.nn.utils.rnn import pad_sequence
+from guacamol.utils.chemistry import canonicalize
 
 class Vocabulary:
     bos_token = '<bos>'
@@ -61,18 +49,49 @@ class Vocabulary:
 
     def vec2string(self, vec, rem_bos, rem_eos):
         ids = vec.tolist()
+        try:
+            assert ids[0] == self.bos_id
+            assert len(ids) == self.max_length or ids[-1] == self.eos_id
+        except:
+            print(ids)
+            assert False
+
         if len(ids) == 0:
-            return ""
+            return None
+        if len(ids) > self.max_length:
+            return None
+        if len(ids) == self.max_length and ids[-1] == self.eos_id:
+            return None
+
         if rem_bos:
-            assert ids[0] == self.bos
             ids = ids[1:]
         if rem_eos:
-            assert ids[-1] == self.eos
             ids = ids[:-1]
 
-        string = "".join(map(ids, self.id2token))
+        string = "".join([self.id2token[id_] for id_ in ids])
 
         return string
+
+    def vec2smiles(self, vec, rem_bos, rem_eos):
+        string = self.vec2string(vec, rem_bos, rem_eos)
+        if string is None:
+            return None
+
+        smiles = canonicalize(string)
+        if smiles is None or len(smiles) == 0:
+            return None
+        if len(smiles) > self.max_smiles_length:
+            return None
+
+        return smiles
+
+    def collate(self, batch):
+        strings = batch
+        vecs = [self.string2vec(string, add_bos=True, add_eos=True) for string in strings]
+        vecs = list(sorted(vecs, key=lambda tsr: tsr.size(0), reverse=True))
+        lengths = torch.tensor([vec.size(0) for vec in vecs])
+        vecs = pad_sequence(vecs, batch_first=True, padding_value=self.pad_id)
+        return vecs, lengths
 
 class ZINCVocabulary(Vocabulary):
     ordinary_tokens = (
