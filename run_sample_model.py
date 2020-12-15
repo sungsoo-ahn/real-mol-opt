@@ -14,7 +14,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--model_path", type=str, default="./result/tmp/RMO-76/checkpoint_000.pt")
     parser.add_argument("--smis_path", type=str, default="./result/tmp/RMO-76/generated_smis_000.txt")
-    parser.add_argument("--num_samples", type=int, default=10000)
+    parser.add_argument("--num_samples", type=int, default=1000)
     parser.add_argument("--batch_size", type=int, default=256)
     args = parser.parse_args()
 
